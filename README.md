@@ -1,6 +1,5 @@
 <div align="center">
 
-<!-- Replace with your logo:-->
 <img src="assets/sea.png" width="120" alt="Undertow">
 
 # 🌊 Undertow Protocol
