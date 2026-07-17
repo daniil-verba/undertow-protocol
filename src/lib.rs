@@ -24,8 +24,8 @@ pub mod network;
 
 // ─── Beacon (requires `network` feature) ──────────────────
 // Contains beacon server, client, and credits.
-// #[cfg(feature = "network")]
-// pub mod beacon;
+#[cfg(feature = "network")]
+pub mod beacon;
 
 // ─── DHT (optional, requires `network`) ────────────────────
 // #[cfg(feature = "network")]
