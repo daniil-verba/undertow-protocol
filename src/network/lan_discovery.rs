@@ -1,11 +1,10 @@
 //! ## LAN Discovery / Локальное обнаружение
 //!
-//! Discovers peers in the local network via UDP broadcast.
-//! / Обнаруживает пиров в локальной сети через UDP broadcast.
-
+//! Discovers peers in the local network via UDP multicast.
+//! / Обнаруживает пиров в локальной сети через UDP multicast.
 use crate::protocol::peer_id::PeerId;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -31,7 +30,7 @@ pub enum LanMessageType {
 /// LAN Discovery client.
 pub struct LanDiscovery {
     socket: Arc<UdpSocket>,
-    broadcast_addr: SocketAddr,
+    multicast_addr: SocketAddr,
     peer_id: PeerId,
     username: String,
     port: u16,
@@ -40,24 +39,40 @@ pub struct LanDiscovery {
 impl LanDiscovery {
     /// Creates a new LAN discovery instance.
     pub async fn new(peer_id: PeerId, username: String, port: u16) -> Result<Self, String> {
-        // Bind to a random port for receiving
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
+        // 1. Используем Multicast-адрес (стандарт для локальных сетей, как SSDP).
+        // Он гораздо надежнее, чем глобальный broadcast 255.255.255.255, который часто блокируется ОС.
+        let multicast_addr: SocketAddr =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 9999));
+
+        // 2. Создаем стандартный сокет, чтобы включить SO_REUSEADDR.
+        // Это КРИТИЧЕСКИ важно для тестирования: позволяет запустить несколько узлов на одном ПК.
+        let std_socket = StdUdpSocket::bind("0.0.0.0:9999")
             .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
 
-        // Enable broadcast
-        socket
-            .set_broadcast(true)
-            .map_err(|e| format!("Failed to enable broadcast: {}", e))?;
+        std_socket
+            .set_reuse_address(true)
+            .map_err(|e| format!("Failed to set reuse address: {}", e))?;
 
-        // Use standard broadcast address
-        let broadcast_addr = "255.255.255.255:9999"
-            .parse()
-            .map_err(|e| format!("Invalid broadcast address: {}", e))?;
+        // 3. Присоединяемся к multicast-группе (требуется в Windows/macOS для получения пакетов)
+        let local_addr = std_socket.local_addr().map_err(|e| e.to_string())?;
+        if let SocketAddr::V4(local_ipv4) = local_addr {
+            // Игнорируем ошибку, так как на некоторых виртуальных интерфейсах это может fail,
+            // но на основном сетевом интерфейсе сработает корректно.
+            let _ =
+                std_socket.join_multicast_v4(&Ipv4Addr::new(239, 255, 255, 250), &local_ipv4.ip());
+        }
+
+        std_socket
+            .set_nonblocking(true)
+            .map_err(|e| format!("Failed to set non-blocking: {}", e))?;
+
+        // 4. Конвертируем в асинхронный сокет tokio
+        let socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| format!("Failed to convert to tokio socket: {}", e))?;
 
         Ok(Self {
             socket: Arc::new(socket),
-            broadcast_addr,
+            multicast_addr,
             peer_id,
             username,
             port,
@@ -72,14 +87,12 @@ impl LanDiscovery {
             port: self.port,
             msg_type: LanMessageType::Announce,
         };
-
         let data = serde_json::to_vec(&msg).map_err(|e| format!("Failed to serialize: {}", e))?;
 
         self.socket
-            .send_to(&data, self.broadcast_addr)
+            .send_to(&data, self.multicast_addr)
             .await
-            .map_err(|e| format!("Failed to send broadcast: {}", e))?;
-
+            .map_err(|e| format!("Failed to send multicast: {}", e))?;
         Ok(())
     }
 
@@ -91,14 +104,12 @@ impl LanDiscovery {
             port: self.port,
             msg_type: LanMessageType::Leave,
         };
-
         let data = serde_json::to_vec(&msg).map_err(|e| format!("Failed to serialize: {}", e))?;
 
         self.socket
-            .send_to(&data, self.broadcast_addr)
+            .send_to(&data, self.multicast_addr)
             .await
             .map_err(|e| format!("Failed to send leave: {}", e))?;
-
         Ok(())
     }
 
@@ -107,23 +118,23 @@ impl LanDiscovery {
     where
         F: FnMut(LanDiscoveryMessage, SocketAddr) + Send + 'static,
     {
-        // Create a new socket for listening (bind to same port)
-        let listen_socket = UdpSocket::bind("0.0.0.0:9999")
-            .await
-            .map_err(|e| format!("Failed to bind listen socket: {}", e))?;
-
-        listen_socket
-            .set_broadcast(true)
-            .map_err(|e| format!("Failed to enable broadcast on listen socket: {}", e))?;
+        // МЫ ИСПОЛЬЗУЕМ УЖЕ СОЗДАННЫЙ СОКЕТ из new(), а не создаем новый!
+        // Это предотвращает ошибку "Address already in use" при запуске второго узла.
+        let socket = Arc::clone(&self.socket);
+        let my_peer_id_str = self.peer_id.to_string();
 
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
-                match timeout(Duration::from_secs(60), listen_socket.recv_from(&mut buf)).await {
+                match timeout(Duration::from_secs(60), socket.recv_from(&mut buf)).await {
                     Ok(Ok((size, addr))) => {
                         let data = &buf[..size];
                         match serde_json::from_slice::<LanDiscoveryMessage>(data) {
                             Ok(msg) => {
+                                // Игнорируем собственные сообщения
+                                if msg.peer_id == my_peer_id_str {
+                                    continue;
+                                }
                                 callback(msg, addr);
                             }
                             Err(e) => {
@@ -135,49 +146,11 @@ impl LanDiscovery {
                         eprintln!("[LAN] Recv error: {}", e);
                     }
                     Err(_) => {
-                        // Timeout - continue
+                        // Timeout - продолжаем цикл
                     }
                 }
             }
         });
-
-        Ok(())
-    }
-
-    /// Sends an announce and starts periodic announcements.
-    pub async fn start_announce_loop(&self) -> Result<(), String> {
-        let socket = Arc::clone(&self.socket);
-        let peer_id = self.peer_id.clone();
-        let username = self.username.clone();
-        let port = self.port;
-        let broadcast_addr = self.broadcast_addr;
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-
-                let msg = LanDiscoveryMessage {
-                    peer_id: peer_id.to_string(),
-                    username: username.clone(),
-                    port,
-                    msg_type: LanMessageType::Announce,
-                };
-
-                let data = match serde_json::to_vec(&msg) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("[LAN] Failed to serialize announce: {}", e);
-                        continue;
-                    }
-                };
-
-                if let Err(e) = socket.send_to(&data, broadcast_addr).await {
-                    eprintln!("[LAN] Failed to send announce: {}", e);
-                }
-            }
-        });
-
         Ok(())
     }
 }
@@ -186,7 +159,7 @@ impl Clone for LanDiscovery {
     fn clone(&self) -> Self {
         Self {
             socket: Arc::clone(&self.socket),
-            broadcast_addr: self.broadcast_addr,
+            multicast_addr: self.multicast_addr,
             peer_id: self.peer_id.clone(),
             username: self.username.clone(),
             port: self.port,
