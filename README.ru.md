@@ -11,7 +11,7 @@
 [![Status](https://img.shields.io/badge/Status-Prototype-yellow)](https://github.com/daniil-verba/undertow-protocol)
 <!-- [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/rqJJf9WcV6) -->
 
-**Текущая версия: v0.1.0** | [Список изменений](CHANGELOG.ru.md)
+**Текущая версия: v0.1.2** | [Список изменений](CHANGELOG.ru.md)
 
 **Русский** | [English](README.md)
 
