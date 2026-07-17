@@ -20,3 +20,6 @@ pub use lan_beacon::{ChatMessage, LanBeacon, LanEvent, LanMessage, LanMessageTyp
 pub use local::LocalDiscovery;
 pub use nat::NatDetector;
 pub use peer::Peer;
+
+pub mod lan_discovery;
+pub use lan_discovery::LanDiscovery;
