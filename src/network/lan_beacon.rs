@@ -160,7 +160,7 @@ impl LanBeacon {
                     .map(|(id, peer)| (*id, peer.username.clone()))
                     .collect();
 
-                for (id, username) in expired_peers {
+                for (id, _username) in expired_peers {
                     if let Some(peer) = peers_guard.remove(&id) {
                         let _ = heartbeat_tx.send(LanEvent::PeerLeft {
                             peer_id: id,
