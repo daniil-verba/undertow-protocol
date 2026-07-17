@@ -2,10 +2,11 @@
 //!
 //! Обнаружение пиров в локальной сети через UDP multicast.
 //! / Peer discovery in local network via UDP multicast.
-
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -49,7 +50,7 @@ pub struct ChatMessage {
 pub struct LanPeer {
     pub peer_id: [u8; 32],
     pub username: String,
-    pub addr: SocketAddr,
+    pub addr: SocketAddr, // UDP адрес для отправки ответов
     pub last_seen: Instant,
     pub is_active: bool,
 }
@@ -61,7 +62,7 @@ pub struct LanBeacon {
     my_peer_id: [u8; 32],
     my_username: Arc<Mutex<String>>,
     my_port: u16,
-    running: Arc<Mutex<bool>>,
+    running: Arc<AtomicBool>,
 }
 
 impl LanBeacon {
@@ -71,24 +72,33 @@ impl LanBeacon {
         username: String,
         port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Привязываемся к порту для получения
-        let recv_socket = UdpSocket::bind(format!("0.0.0.0:{}", MULTICAST_PORT)).await?;
-        recv_socket.set_multicast_loop_v4(true)?;
-        recv_socket.set_multicast_ttl_v4(1)?;
+        // 1. Создаем сокет через socket2 для установки SO_REUSEADDR
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        // Присоединяемся к мультикаст-группе
-        let interface = Ipv4Addr::new(0, 0, 0, 0);
-        recv_socket.join_multicast_v4(MULTICAST_GROUP, interface)?;
+        // SO_REUSEADDR позволяет нескольким процессам слушать один и тот же порт.
+        // Этого достаточно для корректной работы multicast на Linux/macOS.
+        socket.set_reuse_address(true)?;
 
-        let socket = Arc::new(recv_socket);
+        // 2. Привязываем к порту
+        let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, MULTICAST_PORT));
+        socket.bind(&bind_addr.into())?;
+
+        // 3. Присоединяемся к multicast-группе
+        socket.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+        socket.set_multicast_loop_v4(true)?;
+        socket.set_nonblocking(true)?;
+
+        // 4. Конвертируем в std::net::UdpSocket, а затем в tokio::net::UdpSocket
+        let std_socket: std::net::UdpSocket = socket.into();
+        let recv_socket = UdpSocket::from_std(std_socket)?;
 
         Ok(Self {
-            socket,
+            socket: Arc::new(recv_socket),
             peers: Arc::new(Mutex::new(HashMap::new())),
             my_peer_id: peer_id,
             my_username: Arc::new(Mutex::new(username)),
             my_port: port,
-            running: Arc::new(Mutex::new(true)),
+            running: Arc::new(AtomicBool::new(true)), // Или AtomicBool, если вы его уже исправили
         })
     }
 
@@ -101,7 +111,7 @@ impl LanBeacon {
         let my_username = self.my_username.clone();
         let my_port = self.my_port;
 
-        // Задача отправки heartbeat
+        // === Задача отправки heartbeat ===
         let heartbeat_tx = tx.clone();
         let heartbeat_peers = peers.clone();
         let heartbeat_socket = socket.clone();
@@ -114,19 +124,15 @@ impl LanBeacon {
             let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
             loop {
                 interval.tick().await;
-
-                // Проверяем, запущен ли beacon
-                if !*heartbeat_running.lock().await {
+                if !heartbeat_running.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Отправляем announce
                 let username = heartbeat_name.lock().await.clone();
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-
                 let msg = LanMessage {
                     peer_id: heartbeat_id,
                     username: username.clone(),
@@ -135,18 +141,11 @@ impl LanBeacon {
                     msg_type: LanMessageType::Announce,
                 };
 
-                let data = match serde_json::to_vec(&msg) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Failed to serialize announce: {}", e);
-                        continue;
+                if let Ok(data) = serde_json::to_vec(&msg) {
+                    let addr = SocketAddr::from((MULTICAST_GROUP, MULTICAST_PORT));
+                    if let Err(e) = heartbeat_socket.send_to(&data, addr).await {
+                        eprintln!("[LAN] Failed to send announce: {}", e);
                     }
-                };
-
-                // Отправляем в multicast группу
-                let addr = SocketAddr::from((MULTICAST_GROUP, MULTICAST_PORT));
-                if let Err(e) = heartbeat_socket.send_to(&data, addr).await {
-                    eprintln!("Failed to send announce: {}", e);
                 }
 
                 // Очищаем старые пиры
@@ -171,7 +170,7 @@ impl LanBeacon {
             }
         });
 
-        // Задача приема сообщений
+        // === Задача приема сообщений ===
         let recv_socket = self.socket.clone();
         let recv_peers = self.peers.clone();
         let recv_tx = tx.clone();
@@ -183,42 +182,31 @@ impl LanBeacon {
         tokio::spawn(async move {
             let mut buf = [0u8; 8192];
             loop {
-                // Проверяем, запущен ли beacon
-                if !*recv_running.lock().await {
+                if !recv_running.load(Ordering::Relaxed) {
                     break;
                 }
-
                 match recv_socket.recv_from(&mut buf).await {
                     Ok((size, src_addr)) => {
-                        // Игнорируем свои же сообщения
                         let data = &buf[..size];
                         match serde_json::from_slice::<LanMessage>(data) {
                             Ok(msg) => {
-                                // Игнорируем свои сообщения
                                 if msg.peer_id == recv_my_id {
-                                    continue;
+                                    continue; // Игнорируем свои сообщения
                                 }
-
                                 match msg.msg_type {
                                     LanMessageType::Announce => {
                                         let now = Instant::now();
                                         let mut peers_guard = recv_peers.lock().await;
-
-                                        // Проверяем, не появился ли новый пир
                                         let is_new = !peers_guard.contains_key(&msg.peer_id);
-
                                         let peer = LanPeer {
                                             peer_id: msg.peer_id,
                                             username: msg.username.clone(),
-                                            addr: SocketAddr::from((src_addr.ip(), msg.port)),
+                                            addr: src_addr, // Используем адрес отправителя для UDP-ответов
                                             last_seen: now,
                                             is_active: true,
                                         };
-
                                         peers_guard.insert(msg.peer_id, peer);
-
                                         if is_new {
-                                            // Новый пир обнаружен
                                             let _ = recv_tx.send(LanEvent::PeerJoined {
                                                 peer_id: msg.peer_id,
                                                 username: msg.username,
@@ -236,12 +224,10 @@ impl LanBeacon {
                                         }
                                     }
                                     LanMessageType::Ping => {
-                                        // Отвечаем Pong
                                         let timestamp = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_secs();
-
                                         let pong = LanMessage {
                                             peer_id: recv_my_id,
                                             username: recv_my_name.lock().await.clone(),
@@ -254,7 +240,6 @@ impl LanBeacon {
                                         }
                                     }
                                     LanMessageType::Pong => {
-                                        // Обновляем время последнего контакта
                                         let mut peers_guard = recv_peers.lock().await;
                                         if let Some(peer) = peers_guard.get_mut(&msg.peer_id) {
                                             peer.last_seen = Instant::now();
@@ -262,56 +247,44 @@ impl LanBeacon {
                                         }
                                     }
                                     LanMessageType::Message => {
-                                        // Получено сообщение чата
-                                        // Пытаемся десериализовать ChatMessage из оставшейся части данных
-                                        if size > data.len() {
-                                            // Если данные закончились, пытаемся десериализовать все как ChatMessage
-                                            if let Ok(chat_msg) =
-                                                serde_json::from_slice::<ChatMessage>(data)
-                                            {
+                                        // Ищем JSON объект ChatMessage в конце данных
+                                        let data_str = String::from_utf8_lossy(data);
+                                        if let Some(start) = data_str.rfind('{') {
+                                            if let Ok(chat_msg) = serde_json::from_str::<ChatMessage>(
+                                                &data_str[start..],
+                                            ) {
                                                 let _ = recv_tx.send(LanEvent::ChatMessage {
                                                     sender_id: msg.peer_id,
                                                     sender_name: msg.username,
                                                     content: chat_msg.content,
                                                 });
-                                            } else {
-                                                eprintln!("Failed to parse chat message");
                                             }
-                                        } else {
-                                            // Пробуем найти ChatMessage в конце данных
-                                            // Ищем JSON объект ChatMessage
-                                            let data_str = String::from_utf8_lossy(data);
-                                            if let Some(start) = data_str.rfind('{') {
-                                                if let Ok(chat_msg) =
-                                                    serde_json::from_str::<ChatMessage>(
-                                                        &data_str[start..],
-                                                    )
-                                                {
-                                                    let _ = recv_tx.send(LanEvent::ChatMessage {
-                                                        sender_id: msg.peer_id,
-                                                        sender_name: msg.username,
-                                                        content: chat_msg.content,
-                                                    });
-                                                }
-                                            }
+                                        } else if let Ok(chat_msg) =
+                                            serde_json::from_slice::<ChatMessage>(data)
+                                        {
+                                            let _ = recv_tx.send(LanEvent::ChatMessage {
+                                                sender_id: msg.peer_id,
+                                                sender_name: msg.username,
+                                                content: chat_msg.content,
+                                            });
                                         }
                                     }
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("Failed to deserialize LAN message: {}", e);
+                            Err(_) => {
+                                // Игнорируем не-LanMessage пакеты (например, чистые ChatMessage)
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error receiving LAN message: {}", e);
+                        eprintln!("[LAN] Error receiving: {}", e);
                     }
                 }
             }
         });
     }
 
-    /// Отправляет сообщение в LAN
+    /// Отправляет сообщение конкретному пиру в LAN
     pub async fn send_chat_message(
         &self,
         target_peer_id: [u8; 32],
@@ -324,15 +297,12 @@ impl LanBeacon {
                 .unwrap_or_default()
                 .as_secs();
 
-            // Создаем сообщение чата
             let chat_msg = ChatMessage {
                 sender_id: self.my_peer_id,
                 sender_name: self.my_username.lock().await.clone(),
                 content: content.clone(),
                 timestamp,
             };
-
-            // Отправляем как обычное LAN сообщение с типом Message
             let msg = LanMessage {
                 peer_id: self.my_peer_id,
                 username: self.my_username.lock().await.clone(),
@@ -341,19 +311,16 @@ impl LanBeacon {
                 msg_type: LanMessageType::Message,
             };
 
-            // Сериализуем оба сообщения: сначала LanMessage, потом ChatMessage
             let mut data = serde_json::to_vec(&msg)?;
             let chat_data = serde_json::to_vec(&chat_msg)?;
             data.extend_from_slice(&chat_data);
 
-            // Отправляем напрямую пиру
             let addr = peer.addr;
             drop(peers_guard); // Освобождаем блокировку перед отправкой
-
             self.socket.send_to(&data, addr).await?;
             Ok(())
         } else {
-            Err(format!("Peer not found in LAN: {:?}", target_peer_id).into())
+            Err(format!("Peer not found in LAN: {:?}", hex::encode(target_peer_id)).into())
         }
     }
 
@@ -375,7 +342,6 @@ impl LanBeacon {
             timestamp,
             msg_type: LanMessageType::Message,
         };
-
         let chat_msg = ChatMessage {
             sender_id: self.my_peer_id,
             sender_name: self.my_username.lock().await.clone(),
@@ -392,14 +358,7 @@ impl LanBeacon {
                 let _ = self.socket.send_to(&data, peer.addr).await;
             }
         }
-
         Ok(())
-    }
-
-    /// Обновляет имя пользователя
-    pub async fn update_username(&self, new_username: String) {
-        let mut username_guard = self.my_username.lock().await;
-        *username_guard = new_username;
     }
 
     /// Получает список активных пиров
@@ -414,12 +373,10 @@ impl LanBeacon {
 
     /// Останавливает beacon
     pub async fn stop(&self) {
-        // Отправляем goodbye
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-
         let msg = LanMessage {
             peer_id: self.my_peer_id,
             username: self.my_username.lock().await.clone(),
@@ -427,14 +384,11 @@ impl LanBeacon {
             timestamp,
             msg_type: LanMessageType::Goodbye,
         };
-
         if let Ok(data) = serde_json::to_vec(&msg) {
             let addr = SocketAddr::from((MULTICAST_GROUP, MULTICAST_PORT));
             let _ = self.socket.send_to(&data, addr).await;
         }
-
-        let mut running_guard = self.running.lock().await;
-        *running_guard = false;
+        self.running.store(false, Ordering::Relaxed);
     }
 }
 
