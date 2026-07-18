@@ -36,7 +36,7 @@ cd undertow-client
 
 ### 3. Add Upstream (Original Repository)
 ```bash
-git remote add upstream https://github.com/daniil-verba/undertow-client.git
+git remote add upstream https://github.com/daniil-verba/undertow-protocol.git
 git fetch upstream
 ```
 
@@ -250,7 +250,7 @@ git push origin feature/add-p2p
 1. Go to your fork on GitHub
 2. Click **"Compare & pull request"**
 3. Select:
-   - **base:** `daniil-verba/undertow-client:dev`
+   - **base:** `daniil-verba/undertow-protocol:dev`
    - **compare:** `your-username/undertow-client:feature/your-feature`
 4. Fill in the PR template:
 
@@ -479,7 +479,7 @@ git push origin dev
 
 ## 📞 Contact
 
-- **GitHub Issues:** [Create Issue](https://github.com/daniil-verba/undertow-client/issues)
+- **GitHub Issues:** [Create Issue](https://github.com/daniil-verba/undertow-protocol/issues)
 - **Discord:** [Discord Link](#)
 
 ---
