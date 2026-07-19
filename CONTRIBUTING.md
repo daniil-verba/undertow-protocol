@@ -30,13 +30,13 @@ Click the **Fork** button in the top right corner on GitHub.
 
 ### 2. Clone Your Fork
 ```bash
-git clone https://github.com/your-username/undertow-client.git
-cd undertow-client
+git clone https://github.com/your-username/undertow-protocol.git
+cd undertow-protocol
 ```
 
 ### 3. Add Upstream (Original Repository)
 ```bash
-git remote add upstream https://github.com/daniil-verba/undertow-client.git
+git remote add upstream https://github.com/daniil-verba/undertow-protocol.git
 git fetch upstream
 ```
 
@@ -250,8 +250,8 @@ git push origin feature/add-p2p
 1. Go to your fork on GitHub
 2. Click **"Compare & pull request"**
 3. Select:
-   - **base:** `daniil-verba/undertow-client:dev`
-   - **compare:** `your-username/undertow-client:feature/your-feature`
+   - **base:** `daniil-verba/undertow-protocol:dev`
+   - **compare:** `your-username/undertow-protocol:feature/your-feature`
 4. Fill in the PR template:
 
 ```markdown
@@ -479,7 +479,7 @@ git push origin dev
 
 ## 📞 Contact
 
-- **GitHub Issues:** [Create Issue](https://github.com/daniil-verba/undertow-client/issues)
+- **GitHub Issues:** [Create Issue](https://github.com/daniil-verba/undertow-protocol/issues)
 - **Discord:** [Discord Link](#)
 
 ---
