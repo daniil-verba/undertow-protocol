@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Daniil Verba <daniilverba123@gmail.com>"]
 description = "Core protocol library for Undertow P2P network"
 license = "MIT"
-repository = "https://gitverse.ru/daniil-verba/undertow-protocol"
+repository = "https://github.com/daniil-verba/undertow-protocol"
 
 [lib]
 name = "undertow_protocol"
