@@ -1,66 +1,68 @@
-// use tokio::io::{AsyncReadExt, AsyncWriteExt};
-// use tokio::net::TcpStream;
+//! ## Beacon Client / Клиент маяка
+//!
+//! Отвечает за взаимодействие с серверами Beacon (rendezvous, relay, начисление кредитов).
+//! Теперь использует надежный зашифрованный транспорт Iroh вместо сырых TCP-сокетов,
+//! что гарантирует работу даже за строгими NAT и фаерволами.
 
-// use crate::protocol::packet::Packet;
-// use crate::protocol::peer_id::PeerId;
+use crate::network::transport::IrohTransport;
+use crate::protocol::packet::Packet;
+use crate::protocol::peer_id::PeerId;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
-// pub struct BeaconClient {
-//     stream: TcpStream,
-//     peer_id: PeerId,
-// }
+/// Клиент для взаимодействия с узлом Beacon.
+pub struct BeaconClient {
+    /// Ссылка на основной транспортный слой (для отправки пакетов)
+    #[allow(dead_code)]
+    transport: Arc<IrohTransport>,
+    /// PeerId сервера Beacon, к которому мы подключаемся
+    beacon_peer_id: PeerId,
+    /// Канал для асинхронной отправки пакетов на Beacon
+    tx: mpsc::Sender<Packet>,
+}
 
-// impl BeaconClient {
-//     pub async fn connect(beacon_addr: &str, peer_id: PeerId) -> Result<Self, String> {
-//         let mut stream = TcpStream::connect(beacon_addr)
-//             .await
-//             .map_err(|e| format!("Connect to beacon failed: {}", e))?;
+impl BeaconClient {
+    /// Создает нового клиента Beacon.
+    ///
+    /// # Аргументы
+    /// * `transport` - Инициализированный транспортный слой Iroh.
+    /// * `beacon_peer_id` - Известный PeerId сервера Beacon (загружается из конфига или хардкода).
+    pub fn new(transport: Arc<IrohTransport>, beacon_peer_id: PeerId) -> Self {
+        // Создаем канал для отправки пакетов.
+        // Размер 100 достаточен для очередей служебных сообщений (ping, credits, rendezvous).
+        let (tx, mut rx) = mpsc::channel::<Packet>(100);
 
-//         // Отправляем свой PeerId для аутентификации
-//         stream
-//             .write_all(peer_id.as_bytes())
-//             .await
-//             .map_err(|e| format!("Auth failed: {}", e))?;
+        let transport_clone = transport.clone();
+        let beacon_id = beacon_peer_id;
 
-//         println!("[BeaconClient] Connected to {} as {}", beacon_addr, peer_id);
+        // Запускаем фоновую задачу для обработки исходящих пакетов на Beacon.
+        // Это развязывает руки основному потоку приложения.
+        tokio::spawn(async move {
+            while let Some(packet) = rx.recv().await {
+                if let Err(e) = transport_clone.send_packet(beacon_id, &packet).await {
+                    eprintln!("[BeaconClient] Ошибка отправки пакета на Beacon: {}", e);
+                    // TODO: Здесь можно добавить логику повторной отправки (retry with backoff)
+                }
+            }
+        });
 
-//         Ok(Self { stream, peer_id })
-//     }
+        Self {
+            transport,
+            beacon_peer_id,
+            tx,
+        }
+    }
 
-//     pub async fn send_packet(&mut self, packet: &Packet) -> Result<(), String> {
-//         let bytes = packet.serialize();
-//         let len = (bytes.len() as u32).to_be_bytes();
+    /// Асинхронно отправляет пакет на сервер Beacon.
+    pub async fn send_packet(&self, packet: &Packet) -> Result<(), String> {
+        self.tx
+            .send(packet.clone())
+            .await
+            .map_err(|e| e.to_string())
+    }
 
-//         self.stream
-//             .write_all(&len)
-//             .await
-//             .map_err(|e| format!("Write failed: {}", e))?;
-//         self.stream
-//             .write_all(&bytes)
-//             .await
-//             .map_err(|e| format!("Write failed: {}", e))?;
-
-//         Ok(())
-//     }
-
-//     pub async fn receive_packet(&mut self) -> Result<Packet, String> {
-//         let mut len_buf = [0u8; 4];
-//         self.stream
-//             .read_exact(&mut len_buf)
-//             .await
-//             .map_err(|e| format!("Read length failed: {}", e))?;
-
-//         let packet_len = u32::from_be_bytes(len_buf) as usize;
-//         let mut packet_buf = vec![0u8; packet_len];
-
-//         self.stream
-//             .read_exact(&mut packet_buf)
-//             .await
-//             .map_err(|e| format!("Read packet failed: {}", e))?;
-
-//         Packet::deserialize(&packet_buf)
-//     }
-
-//     pub fn peer_id(&self) -> &PeerId {
-//         &self.peer_id
-//     }
-// }
+    /// Возвращает PeerId сервера Beacon, с которым работает клиент.
+    pub fn beacon_peer_id(&self) -> PeerId {
+        self.beacon_peer_id
+    }
+}

@@ -1,18 +1,13 @@
 //! ## Network Module / Модуль сети
 //!
-//! Сетевая подсистема Undertow: обнаружение пиров, NAT, DHT и P2P соединения.
-//! / Undertow network subsystem: peer discovery, NAT, DHT and P2P connections.
+//! Сетевая подсистема Undertow, построенная на базе Iroh.
+//! Iroh берет на себя NAT traversal, STUN, relay и шифрование,
+//! позволяя нам сосредоточиться на логике протокола (DHT, сообщения).
 
 pub mod beacon_client;
-pub mod dht;
-pub mod hole_puncher;
-pub mod kbucket;
-pub mod lan;
-pub mod local;
-pub mod nat;
-pub mod node;
-pub mod peer;
-pub mod relay;
-pub mod stun;
+pub mod transport;
+// pub mod dht;      // Оставлен для будущей интеграции поверх IrohTransport
+// pub mod kbucket;  // Оставлен для будущей интеграции
 
-pub use lan::{LanBeacon, LanEvent, LanPeer};
+pub use beacon_client::BeaconClient;
+pub use transport::{IrohTransport, TransportError};

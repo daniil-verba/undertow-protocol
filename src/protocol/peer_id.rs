@@ -1,81 +1,61 @@
 //! ## PeerId Module / Модуль PeerId
 //!
-//! 32-byte unique identifier for each node in the network.
-// / 32-байтовый уникальный идентификатор каждого узла в сети.
+//! 32-байтовый уникальный идентификатор каждого узла в сети.
+//! В iroh 1.0 тип NodeId был переименован в EndpointId, так как публичный ключ
+//! используется для идентификации именно конечной точки (endpoint) соединения.
 
-use crate::protocol::crypto::sha256;
-use rand::Rng;
+use iroh::EndpointId;
+use std::str::FromStr;
 
-/// Unique 32-byte identifier for a network peer.
 /// Уникальный 32-байтовый идентификатор сетевого пира.
-///
-/// Derived from SHA-256 of the public key, ensuring cryptographic identity.
-/// / Выводится из SHA-256 публичного ключа, обеспечивая криптографическую идентичность.
+/// Прозрачная обертка над iroh::EndpointId для сохранения совместимости API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PeerId([u8; 32]);
+pub struct PeerId(EndpointId);
 
 impl PeerId {
-    /// Creates PeerId from raw 32 bytes.
-    /// / Создаёт PeerId из сырых 32 байт.
+    /// Создаёт PeerId из сырых 32 байт.
     pub fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self(EndpointId::from_bytes(&bytes).expect("Некорректные байты для EndpointId"))
     }
 
-    /// Derives PeerId from a public key via SHA-256.
-    /// / Выводит PeerId из публичного ключа через SHA-256.
+    /// Безопасное создание PeerId из байтов с обработкой ошибок.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, String> {
+        EndpointId::from_bytes(&bytes)
+            .map(Self)
+            .map_err(|e| format!("Некорректные байты EndpointId: {}", e))
+    }
+
+    /// Выводит PeerId из публичного ключа.
     pub fn from_public_key(public_key: &[u8]) -> Self {
-        Self(sha256(public_key))
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&public_key[..32]);
+        Self::new(bytes)
     }
 
-    /// Returns the PeerId as a lowercase hex string (64 chars).
-    /// / Возвращает PeerId в виде hex-строки в нижнем регистре (64 символа).
+    /// Возвращает PeerId в виде hex-строки в нижнем регистре (64 символа).
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        self.0.to_string()
     }
 
-    /// Parses PeerId from a 64-character hex string.
-    /// / Парсит PeerId из 64-символьной hex-строки.
+    /// Парсит PeerId из 64-символьной hex-строки.
     pub fn from_hex(hex_str: &str) -> Result<Self, String> {
-        if hex_str.len() != 64 {
-            return Err(format!(
-                "Expected 64 hex chars, got {} / Ожидалось 64 hex-символа, получено {}",
-                hex_str.len(),
-                hex_str.len()
-            ));
-        }
-
-        let mut bytes = [0u8; 32];
-        for (i, chunk) in hex_str.as_bytes().chunks(2).enumerate() {
-            let pair = std::str::from_utf8(chunk)
-                .map_err(|_| "Invalid UTF-8 / Некорректный UTF-8".to_string())?;
-            bytes[i] = u8::from_str_radix(pair, 16).map_err(|_| {
-                format!(
-                    "Invalid hex at position {} / Некорректный hex на позиции {}",
-                    i * 2,
-                    i * 2
-                )
-            })?;
-        }
-
-        Ok(Self(bytes))
+        EndpointId::from_str(hex_str)
+            .map(Self)
+            .map_err(|e| format!("Ошибка парсинга hex: {}", e))
     }
 
-    /// Returns a reference to the raw 32-byte array.
-    /// / Возвращает ссылку на сырой 32-байтовый массив.
+    /// Возвращает ссылку на сырой 32-байтовый массив.
     pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+        self.0.as_bytes()
     }
 
-    /// Generates a random PeerId (for testing).
-    /// / Генерирует случайный PeerId (для тестирования).
+    /// Генерирует случайный PeerId (для тестирования).
     pub fn random() -> Self {
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill(&mut bytes);
-        Self(bytes)
+        let secret = iroh::SecretKey::generate();
+        Self(secret.public())
     }
 
-    /// Returns a shortened display form (first 8 hex chars).
-    /// / Возвращает сокращённую форму для отображения (первые 8 hex-символов).
+    /// Возвращает сокращённую форму для отображения (первые 8 hex-символов).
     pub fn short(&self) -> String {
         self.to_hex()[..8].to_string()
     }
@@ -84,5 +64,18 @@ impl PeerId {
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_hex())
+    }
+}
+
+// Прозрачная конвертация между PeerId и EndpointId
+impl From<PeerId> for EndpointId {
+    fn from(val: PeerId) -> Self {
+        val.0
+    }
+}
+
+impl From<EndpointId> for PeerId {
+    fn from(val: EndpointId) -> Self {
+        Self(val)
     }
 }
